@@ -1,0 +1,730 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: CloudFormation template To Automate Aurora Clusters Blue/Green Deployment
+Metadata:
+  'AWS::CloudFormation::Interface':
+    ParameterGroups:
+      - Label:
+          default: Primary Cluster - The Blue cluster
+        Parameters:
+          - DBSourceCluster
+      - Label:
+          default: Destination Cluster Details - The green cluster (clone)
+        Parameters:
+          - DBDestinationCluster
+          - DBClusterVPC
+          - VPCSecurityGroups
+          - VPCSubnetIDs
+          - DBClusterParameterGroupName
+      - Label:
+          default: MySQL Master User details
+        Parameters:
+          - MySQLMasterUser
+          - MySQLMasterPassword
+      - Label:
+          default: MySQL Replication User details
+        Parameters:
+          - MySQLReplicationUser
+          - MySQLReplicationPassword
+    ParameterLabels:
+      DBSourceCluster:
+        default: Source Cluster Name
+      DBDestinationCluster:
+        default: Destination Cluster Name
+      DBClusterVPC:
+        default: VPC ID (The Green cluster (clone) will be created in the same VPC as Blue Cluster)
+      VPCSecurityGroups:
+        default: DB Security Groups
+      VPCSubnetIDs:
+        default: >-
+          VPC Subnet IDs to attach to Lambda Functions connecting to both Blue &
+          Green Clusters
+      BinaryLogRetentionPeriod:
+        default: Binary Log Retention Period
+      DBClusterParameterGroupName:
+        default: DB Cluster Parameter Group Name
+      MySQLReplicationUser:
+        default: MySQL Replication User Name
+      MySQLReplicationPassword:
+        default: MySQL Replication User Password
+      MySQLMasterUser:
+        default: MySQL Master Username
+      MySQLMasterPassword:
+        default: MySQL Master User Password
+Parameters:
+  DBSourceCluster:
+    Type: String
+    Description: The Blue cluster -- Replication Source.
+  DBDestinationCluster:
+    Type: String
+    Description: The Green cluster -- Replication Target.
+  DBClusterVPC:
+    Type: 'AWS::EC2::VPC::Id'
+    Description: >-
+      The Blue Cluster VPC, The Green Cluster will be created in the Same VPC.
+  VPCSecurityGroups:
+    Type: 'List<AWS::EC2::SecurityGroup::Id>'
+    Description: >-
+      The list of security groups to associate with this Cluster, Make sure Port
+      3306 is Open for binary log replication between Blue & Green clusters.
+  VPCSubnetIDs:
+    Type: 'List<AWS::EC2::Subnet::Id>'
+    Description: >-
+      The list of Subnet IDs to attach to the Lambda Functions that will access
+      the Blue & Green Cluster.
+  DBClusterParameterGroupName:
+    Type: String
+    Description: >-
+      The name of the DB cluster parameter group to associate with the new DB
+      cluster. If not provided, the default DB cluster parameter group for the
+      specified engine is used.
+  MySQLReplicationUser:
+    Type: String
+    Description: >-
+      The MySQL User to be used for replication. This User will be created on
+      the blue cluster and will only be used for Replication. The User must be between 4 to 16 letters, numbers or underscores. The first character must be a letter.
+    AllowedPattern: ^[a-zA-Z][0-9a-zA-Z_]{3,15}$
+  MySQLReplicationPassword:
+    Type: String
+    Description: >-
+      The MySQL User password for the MySQL user to be used for Replication.
+      This User will be created on the blue cluster and will only be used for Replication.
+    NoEcho: true
+  MySQLMasterUser:
+    Type: String
+    Description: >-
+      The MySQL Master User to connect to the Blue & Green Cluster. The MySQL
+      Master User must be used to start the binlog mysql.rds_set_external_master
+      procedure. The Master Username and Password are safely stored & encrypted
+      in AWS Secrets Manager.
+  MySQLMasterPassword:
+    Type: String
+    Description: >-
+      The MySQL Master User password to connect to the Blue & Green Cluster. The
+      MySQL Master User must be used to start the binlog
+      mysql.rds_set_external_master procedure. The Master Username and Password
+      are safely stored & encrypted in AWS Secrets Manager.
+    NoEcho: true
+  BinaryLogRetentionPeriod:
+    Type: String
+    Description: >-
+      Specifies the duration in hours before binary logs are automatically
+      deleted. Change the binlog retention period to long enough for the
+      solution to perform the snapshot restore and upgrade process. Defaults to
+      a minimum of 24 hours.
+    Default: 24
+  DBParameterGroupName:
+    Type: String
+    Description: >-
+      The name of the DB Parameter Group to associate with the DB Instances of
+      the Green Cluster. If none provided, the default DB Parameter Group for
+      the specified engine is used.
+  WriterNodeIdent:
+    Type: String
+    Description: >-
+      The Writer Node DB Instance Identifier for the Green Cluster. Constraints:
+      1-Must  contain from 1 to 63 letters, numbers, or hyphens. 2-First
+      character must be a letter.  3-Can't end with a hyphen or contain two
+      consecutive hyphens.
+Conditions:
+  IsDBClusterPGEmpty:  !Equals [!Ref "DBClusterParameterGroupName", ""]
+  IsDbPGEmpty: !Equals [!Ref "DBParameterGroupName", ""]
+Resources:
+  SSMDBSourceCluster:
+    Type: 'AWS::SSM::Parameter'
+    Properties:
+      Name: !Sub "A2UP-DBSourceCluster-${AWS::StackName}"
+      Description: The Blue cluster
+      Value: !Ref DBSourceCluster
+      Type: String
+      Tier: Standard
+      Tags:
+        Key: Created-By
+        Value: Aurora2.0Migration
+  SSMDBDestinationCluster:
+    Type: 'AWS::SSM::Parameter'
+    Properties:
+      Name: !Sub "A2UP-DBDestinationCluster-${AWS::StackName}"
+      Description: The Green cluster
+      Value: !Ref DBDestinationCluster
+      Type: String
+      Tier: Standard
+      Tags:
+        Key: Created-By
+        Value: Aurora2.0Migration
+  SSMDBClusterVPC:
+    Type: 'AWS::SSM::Parameter'
+    Properties:
+      Name: !Sub "A2UP-DBClusterVPC-${AWS::StackName}"
+      Description: The VPC to create the green cluster in.
+      Value: !Ref DBClusterVPC
+      Type: String
+      Tier: Standard
+      Tags:
+        Key: Created-By
+        Value: Aurora2.0Migration
+  SSMVPCSecurityGroups:
+    Type: 'AWS::SSM::Parameter'
+    Properties:
+      Name: !Sub "A2UP-VPCSecurityGroups-${AWS::StackName}"
+      Description: >-
+        The list of security groups to associate with this Cluster, Make sure
+        Port 3306 is Open for binary log replication between Primary & New
+        Cluster.
+      Value: !Join 
+        - ','
+        - !Ref VPCSecurityGroups
+      Type: String
+      Tier: Standard
+      Tags:
+        Key: Created-By
+        Value: Aurora2.0Migration
+  SSMDBClusterParameterGroupName:
+    Type: 'AWS::SSM::Parameter'
+    Properties:
+      Name: !Sub "A2UP-DBClusterParameterGroupName-${AWS::StackName}"
+      Description: >-
+        The name of the DB cluster parameter group to associate with the new DB
+        cluster. If not provided, the default DB cluster parameter group for the
+        specified engine is used.
+      #Value: !Ref DBClusterParameterGroupName
+      Value:
+        Fn::If:
+        - IsDBClusterPGEmpty
+        - 'an_invalid_db_cluster_pg'
+        - Ref: DBClusterParameterGroupName
+      Type: String
+      Tier: Standard
+      Tags:
+        Key: Created-By
+        Value: Aurora2.0Migration
+  SSMA2UPWriterNode:
+    Type: 'AWS::SSM::Parameter'
+    Properties:
+      Name: !Sub "A2UP-WriterNode-${AWS::StackName}"
+      Description: The Write Node DB Instance Identifier.
+      Value: !Ref WriterNodeIdent
+      Type: String
+      Tier: Standard
+      Tags:
+        Key: Created-By
+        Value: Aurora2.0Migration
+  SSMDBParameterGroupName:
+    Type: 'AWS::SSM::Parameter'
+    Properties:
+      Name: !Sub "A2UP-DBParameterGroupName-${AWS::StackName}"
+      Description: >-
+        The name of the DB Parameter Group to associate with the DB Instances in
+        the Green Cluster. If none provided, the default DB Parameter Group for
+        the specified engine is used.
+      #Value: !Ref DBParameterGroupName
+      Value:
+        Fn::If:
+        - IsDbPGEmpty
+        - 'an_invalid_db_param_group'
+        - Ref: DBParameterGroupName
+      Type: String
+      Tier: Standard
+      Tags:
+        Key: Created-By
+        Value: Aurora2.0Migration
+  SSMA2UPBinlogRetentionPeriod:
+    Type: 'AWS::SSM::Parameter'
+    Properties:
+      Name: !Sub "A2UP-BinlogRetentionPeriod-${AWS::StackName}"
+      Description: A2UP-BinlogRetentionPeriod.
+      Value: !Ref BinaryLogRetentionPeriod
+      Type: String
+      Tier: Standard
+      Tags:
+        Key: Created-By
+        Value: Aurora2.0Migration
+  SECRETA2UPMySQLMasterUser:
+    Type: 'AWS::SecretsManager::Secret'
+    Properties:
+      Name: !Sub "A2UP-MySQLMasterUser-${AWS::StackName}"
+      Description: >-
+        This secret stores the MySQL Master Username & Password required to
+        connect to Blue & Green clusters to configure & start binary log
+        replication.
+      SecretString: !Sub '{"username":"${MySQLMasterUser}", "password":"${MySQLMasterPassword}"}'
+      Tags:
+        - Key: Created-By
+          Value: Aurora2.0Migration
+  SECRETA2UPMySQLReplicationUser:
+    Type: 'AWS::SecretsManager::Secret'
+    Properties:
+      Name: !Sub "A2UP-MySQLReplicationUser-${AWS::StackName}"
+      Description: >-
+        This secret stores the MySQL Replication Username & Password. This user
+        will be created by the Solution and used exclusively for Replication
+        between Blue & Green Cluster.
+      SecretString: !Sub >-
+        {"username":"${MySQLReplicationUser}",
+        "password":"${MySQLReplicationPassword}"}
+      Tags:
+        - Key: Created-By
+          Value: Aurora2.0Migration
+  LambdaZipsBucket:
+    Type: 'AWS::S3::Bucket'
+    DeletionPolicy: Retain
+  CopyZips:
+    Type: 'Custom::CopyZips'
+    Properties:
+      ServiceToken: !GetAtt CopyZipsFunction.Arn
+      DestBucket: !Ref LambdaZipsBucket
+      SourceBucket: 'aws-database-blog-clone-cf001'
+      Objects:
+        - artifacts/DBBLOG-1627/VPC_ModBinlogRet.zip
+        - artifacts/DBBLOG-1627/ModBinlogRet.zip
+        - artifacts/DBBLOG-1627/CreateClone.zip
+        - artifacts/DBBLOG-1627/ChkSolPreqV2.zip
+        - artifacts/DBBLOG-1627/CreateDBInstance.zip
+        - artifacts/DBBLOG-1627/VPC_EnbReplGreen.zip
+        - artifacts/DBBLOG-1627/EnbReplGreen.zip
+        - artifacts/DBBLOG-1627/CreateMonDash.zip
+  CopyZipsRole:
+    Type: 'AWS::IAM::Role'
+    DeletionPolicy: Retain
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'
+      Path: /
+      Policies:
+        - PolicyName: lambda-copier
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 's3:GetObject'
+                  - 's3:GetObjectAcl'
+                  - 's3:GetObjectTagging'
+                  - 's3:ListBucket'
+                Resource:
+                  - 'arn:aws:s3:::aws-database-blog-clone-cf001/artifacts/DBBLOG-1627/*'
+              - Effect: Allow
+                Action:
+                  - 's3:PutObject'
+                  - 's3:DeleteObject'
+                  - 's3:AbortMultipartUpload'
+                  - 's3:PutObjectRetention'
+                  - 's3:DeleteObjectVersion'
+                  - 's3:RestoreObject'
+                  - 's3:PutObjectLegalHold'
+                  - 's3:ReplicateDelete'
+                Resource:
+                  - !Sub 'arn:aws:s3:::${LambdaZipsBucket}/*'
+                  - !Sub 'arn:aws:s3:::${LambdaZipsBucket}'
+  CopyZipsFunction:
+    Type: 'AWS::Lambda::Function'
+    Properties:
+      Description: Copies objects from a source S3 bucket to a destination
+      FunctionName: !Sub "CopyZipsFunction-${AWS::StackName}"
+      Handler: index.handler
+      Runtime: python3.7
+      Role: !GetAtt CopyZipsRole.Arn
+      Timeout: 240
+      Code:
+        ZipFile: |
+          import json
+          import logging
+          import threading
+          import boto3
+          import cfnresponse
+
+
+          def copy_objects(source_bucket, dest_bucket, prefix, objects):
+              s3 = boto3.client('s3')
+              for o in objects:
+                  key = prefix + o
+                  copy_source = {
+                      'Bucket': source_bucket,
+                      'Key': key
+                  }
+                  print('copy_source: %s' % copy_source)
+                  print('dest_bucket = %s'%dest_bucket)
+                  print('key = %s' %key)
+                  s3.copy_object(CopySource=copy_source, Bucket=dest_bucket,
+                        Key=key)
+
+
+          def delete_objects(bucket, prefix, objects):
+              s3 = boto3.client('s3')
+              objects = {'Objects': [{'Key': prefix + o} for o in objects]}
+              s3.delete_objects(Bucket=bucket, Delete=objects)
+
+
+          def timeout(event, context):
+              logging.error('Execution is about to time out, sending failure response to CloudFormation')
+              cfnresponse.send(event, context, cfnresponse.FAILED, {}, None)
+
+
+          def handler(event, context):
+              # make sure we send a failure to CloudFormation if the function
+              # is going to timeout
+              timer = threading.Timer((context.get_remaining_time_in_millis()
+                        / 1000.00) - 0.5, timeout, args=[event, context])
+              timer.start()
+
+              print('Received event: %s' % json.dumps(event))
+              status = cfnresponse.SUCCESS
+              try:
+                  source_bucket = event['ResourceProperties']['SourceBucket']
+                  dest_bucket = event['ResourceProperties']['DestBucket']
+                  prefix = ''
+                  objects = event['ResourceProperties']['Objects']
+                  print('source_bucket'+source_bucket)
+                  print('dest_bucket'+dest_bucket)
+                  print('prefix'+prefix)
+                  if event['RequestType'] == 'Delete':
+                      delete_objects(dest_bucket, prefix, objects)
+                  else:
+                      copy_objects(source_bucket, dest_bucket, prefix, objects)
+              except Exception as e:
+                  logging.error('Exception: %s' % e, exc_info=True)
+                  status = cfnresponse.FAILED
+              finally:
+                  timer.cancel()
+                  cfnresponse.send(event, context, status, {}, None)
+  AuroraLambdasRole:
+    Type: 'AWS::IAM::Role'
+    DeletionPolicy: Retain
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'
+        - 'arn:aws:iam::aws:policy/AmazonRDSReadOnlyAccess'
+        - 'arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole'
+      Path: /
+      Policies:
+        - PolicyName: AuroraLambdasBlueGreenDeployment
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'iam:PassRole'
+                Resource: !Sub "arn:aws:iam::${AWS::AccountId}:role/rds-monitoring-role"
+              - Effect: Allow
+                Action:
+                  - 'rds:CreateDBParameterGroup'
+                  - 'rds:ModifyDBParameterGroup'
+                  - 'rds:AddTagsToResource'
+                  - 'rds:CreateDBClusterSnapshot'
+                  - 'rds:CreateDBInstance'
+                  - 'rds:RestoreDBClusterFromSnapshot'
+                  - 'rds:RestoreDBClusterToPointInTime'
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - 'secretsmanager:GetSecretValue'
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - 'cloudwatch:PutDashboard'
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - 'ssm:PutParameter'
+                  - 'ssm:AddTagsToResource'
+                  - 'ssm:ListTagsForResource'
+                  - 'ssm:GetParameters'
+                  - 'ssm:GetParameter'
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - 'lambda:InvokeFunction'
+                Resource: '*'
+  VpcProxyModifyBinlogRetentionPeriod:
+    DependsOn: CopyZips
+    Type: 'AWS::Lambda::Function'
+    Properties:
+      Description: Proxy for VPC Lambda Modify_BINLOG_RETENTION_PERIOD
+      Handler: lambda_function.lambda_handler
+      Runtime: python3.8
+      Role: !GetAtt AuroraLambdasRole.Arn
+      Timeout: 300
+      FunctionName: !Sub "VPC_ModBinlogRet-${AWS::StackName}"
+      Environment:
+        Variables:
+          STACK_NAME: !Ref AWS::StackName
+      Code:
+        S3Bucket: !Ref LambdaZipsBucket
+        S3Key: !Sub 'artifacts/DBBLOG-1627/VPC_ModBinlogRet.zip'
+  ModifyBinlogRetentionPeriod:
+    DependsOn: CopyZips
+    Type: 'AWS::Lambda::Function'
+    Properties:
+      Description: >-
+        VPC Lambda that connects to Blue Cluster to create Replication User and
+        Modify Binlog retention period
+      Handler: lambda_function.lambda_handler
+      Runtime: python3.8
+      Role: !GetAtt AuroraLambdasRole.Arn
+      Timeout: 300
+      FunctionName: !Sub "ModBinlogRet-${AWS::StackName}"
+      Environment:
+        Variables:
+          STACK_NAME: !Ref AWS::StackName
+      Code:
+        S3Bucket: !Ref LambdaZipsBucket
+        S3Key: !Sub 'artifacts/DBBLOG-1627/ModBinlogRet.zip'
+      VpcConfig:
+        SecurityGroupIds: !Ref VPCSecurityGroups
+        SubnetIds: !Ref VPCSubnetIDs
+  CreateCloneCluster:
+    DependsOn: CopyZips
+    Type: 'AWS::Lambda::Function'
+    Properties:
+      Description: >-
+        Triggers after Modify_BINLOG_RETENTION_PERIOD to Create a fast clone of the blue
+        Cluster
+      Handler: lambda_function.lambda_handler
+      Runtime: python3.8
+      Role: !GetAtt AuroraLambdasRole.Arn
+      Timeout: 300
+      FunctionName: !Sub "CreateClone-${AWS::StackName}"
+      Environment:
+        Variables:
+          STACK_NAME: !Ref AWS::StackName
+      Code:
+        S3Bucket: !Ref LambdaZipsBucket
+        S3Key: !Sub 'artifacts/DBBLOG-1627/CreateClone.zip'
+  CreateDBInstancesCloneCluster:
+    DependsOn: CopyZips
+    Type: 'AWS::Lambda::Function'
+    Properties:
+      Description: >-
+        Triggers by the DB Cluster Created RDS Event and creates the Cluster DB
+        Writer Node
+      Handler: lambda_function.lambda_handler
+      Runtime: python3.8
+      Role: !GetAtt AuroraLambdasRole.Arn
+      Timeout: 300
+      FunctionName: !Sub "CreateDBInstance-${AWS::StackName}"
+      Environment:
+        Variables:
+          STACK_NAME: !Ref AWS::StackName
+      Code:
+        S3Bucket: !Ref LambdaZipsBucket
+        S3Key: !Sub 'artifacts/DBBLOG-1627/CreateDBInstance.zip'
+  VPCProxyEnableReplicationOnDestinationCluster:
+    DependsOn: CopyZips
+    Type: 'AWS::Lambda::Function'
+    Properties:
+      Description: >-
+        Triggers by the Binlog Position for the Writer Node creation RDS Event.
+        This function will load mysql user login details & replication user and
+        pass it to the VPC lambda function to start the replication.
+      Handler: lambda_function.lambda_handler
+      Runtime: python3.8
+      Role: !GetAtt AuroraLambdasRole.Arn
+      Timeout: 300
+      FunctionName: !Sub "VPC_EnbReplGreen-${AWS::StackName}"
+      Environment:
+        Variables:
+          STACK_NAME: !Ref AWS::StackName
+      Code:
+        S3Bucket: !Ref LambdaZipsBucket
+        S3Key: !Sub >-
+          artifacts/DBBLOG-1627/VPC_EnbReplGreen.zip
+  EnableReplicationOnDestinationCluster:
+    DependsOn: CopyZips
+    Type: 'AWS::Lambda::Function'
+    Properties:
+      Description: >-
+        Triggers by the Binlog Position for the Writer Node creation RDS Event.
+        This function will load mysql user login details & replication user and
+        pass it to the VPC lambda function to start the replication.
+      Handler: lambda_function.lambda_handler
+      Runtime: python3.8
+      Role: !GetAtt AuroraLambdasRole.Arn
+      Timeout: 300
+      FunctionName: !Sub "EnbReplGreen-${AWS::StackName}"
+      Environment:
+        Variables:
+          STACK_NAME: !Ref AWS::StackName
+      Code:
+        S3Bucket: !Ref LambdaZipsBucket
+        S3Key: !Sub 'artifacts/DBBLOG-1627/EnbReplGreen.zip'
+      VpcConfig:
+        SecurityGroupIds: !Ref VPCSecurityGroups
+        SubnetIds: !Ref VPCSubnetIDs
+  CreateMonitoringDashboard:
+    DependsOn: CopyZips
+    Type: 'AWS::Lambda::Function'
+    Properties:
+      Description: >-
+        Triggers by the ENABLE_REPLICATION_ON_DESTINATION_CLUSTER function to
+        create a CW Dashboard for Seconds Behind Master.
+      Handler: lambda_function.lambda_handler
+      Runtime: python3.8
+      Role: !GetAtt AuroraLambdasRole.Arn
+      Timeout: 300
+      FunctionName: !Sub "CreateMonDash-${AWS::StackName}"
+      Environment:
+        Variables:
+          STACK_NAME: !Ref AWS::StackName
+      Code:
+        S3Bucket: !Ref LambdaZipsBucket
+        S3Key: !Sub 'artifacts/DBBLOG-1627/CreateMonDash.zip'
+  CheckSolutionPrerequisiteV2:
+    DependsOn: CopyZips
+    Type: 'AWS::Lambda::Function'
+    Properties:
+      Description: >-
+        Create the DB Parameter Group or update an existing one to Read ONLY if
+        its exists.
+      Handler: lambda_function.lambda_handler
+      Runtime: python3.8
+      Role: !GetAtt AuroraLambdasRole.Arn
+      Timeout: 300
+      FunctionName: !Sub "ChkSolPreqV2-${AWS::StackName}"
+      Environment:
+        Variables:
+          STACK_NAME: !Ref AWS::StackName
+      Code:
+        S3Bucket: !Ref LambdaZipsBucket
+        S3Key: !Sub 'artifacts/DBBLOG-1627/ChkSolPreqV2.zip'
+  DBClusterCreatedEvent:
+    Type: 'AWS::Events::Rule'
+    Properties:
+      Description: >-
+        The Clone DB Cluster has been created successfully, triggers
+        CreateDBInstancesCloneCluster Lambda function.
+      Name: !Sub "DBClusterCreatedEvent-${AWS::StackName}"
+      EventPattern:
+        source:
+          - aws.rds
+        detail-type:
+          - RDS DB Cluster Event
+      State: ENABLED
+      Targets:
+        - Arn:
+            'Fn::GetAtt':
+              - CreateDBInstancesCloneCluster
+              - Arn
+          Id: TargetCreateDBInstancesCloneCluster
+  PermissionForDBClusterCreatedEventToInvokeLambda:
+    Type: 'AWS::Lambda::Permission'
+    Properties:
+      FunctionName:
+        Ref: CreateDBInstancesCloneCluster
+      Action: 'lambda:InvokeFunction'
+      Principal: events.amazonaws.com
+      SourceArn:
+        'Fn::GetAtt':
+          - DBClusterCreatedEvent
+          - Arn
+  WriterNodeBinlogPositionEvent:
+    Type: 'AWS::Events::Rule'
+    Properties:
+      Description: >-
+        The Green cluster Writer Node is created and the Binlog Position is
+        captured, triggers
+      Name: !Sub "WriterNodeBinlogPositionEvent-${AWS::StackName}"
+      EventPattern:
+        source:
+          - aws.rds
+        detail-type:
+          - RDS DB Instance Event
+      State: ENABLED
+      Targets:
+        - Arn:
+            'Fn::GetAtt':
+              - VPCProxyEnableReplicationOnDestinationCluster
+              - Arn
+          Id: TargetVPCProxyEnableReplicationOnDestinationCluster
+  PermissionForWriterNodeBinlogPositionEventToInvokeLambda:
+    Type: 'AWS::Lambda::Permission'
+    Properties:
+      FunctionName:
+        Ref: VPCProxyEnableReplicationOnDestinationCluster
+      Action: 'lambda:InvokeFunction'
+      Principal: events.amazonaws.com
+      SourceArn:
+        'Fn::GetAtt':
+          - WriterNodeBinlogPositionEvent
+          - Arn
+  StatesExecutionRole:
+    Type: 'AWS::IAM::Role'
+    DeletionPolicy: Retain
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - !Sub 'states.${AWS::Region}.amazonaws.com'
+            Action: 'sts:AssumeRole'
+      Path: /
+      Policies:
+        - PolicyName: StatesExecutionPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'lambda:InvokeFunction'
+                Resource: '*'
+  AuroraBlueGreenDeployment:
+    Type: 'AWS::StepFunctions::StateMachine'
+    Properties:
+      DefinitionString: !Sub 
+        - |-
+          {
+            "Comment": "This State Machine starts off the Blue/Green Aurora Cluster Deploymnet",
+            "StartAt": "VPC_PROXY",
+            "States": {
+              "VPC_PROXY": {
+                "Type": "Task",
+                "Resource": "${VpcProxyModifyBinlogRetentionPeriodARN}",
+                "Next": "LOGIN_TO_BLUE_CLUSTER"
+              },
+              "LOGIN_TO_BLUE_CLUSTER": {
+                "Type": "Task",
+                "Resource" : "${ModifyBinlogRetentionPeriodARN}",
+                "Next" : "CLONE_SOURCE_CLUSTER"
+              },
+              "CLONE_SOURCE_CLUSTER": {
+                "Type": "Task",
+                "Resource": "${CreateCloneClusterARN}",
+                "Next": "CHECK_SOLUTION_PREREQUISITES"
+              },
+              "CHECK_SOLUTION_PREREQUISITES": {
+                "Type": "Task",
+                "Resource": "${CheckSolutionPrerequisiteV2ARN}",
+                "End": true
+              }
+            }
+          }
+        - VpcProxyModifyBinlogRetentionPeriodARN: !GetAtt 
+            - VpcProxyModifyBinlogRetentionPeriod
+            - Arn
+          ModifyBinlogRetentionPeriodARN: !GetAtt 
+            - ModifyBinlogRetentionPeriod
+            - Arn
+          CreateCloneClusterARN: !GetAtt 
+            - CreateCloneCluster
+            - Arn
+          CheckSolutionPrerequisiteV2ARN: !GetAtt 
+            - CheckSolutionPrerequisiteV2
+            - Arn
+      StateMachineName: !Sub "AuroraBlueGreenDeployment-${AWS::StackName}"
+      RoleArn: !GetAtt 
+        - StatesExecutionRole
+        - Arn
