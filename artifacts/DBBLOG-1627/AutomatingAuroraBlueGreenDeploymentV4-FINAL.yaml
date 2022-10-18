@@ -125,6 +125,43 @@ Parameters:
       1-Must  contain from 1 to 63 letters, numbers, or hyphens. 2-First
       character must be a letter.  3-Can't end with a hyphen or contain two
       consecutive hyphens.
+  EngineVersionParameter:
+    Type: String
+    Default: 5.7.mysql_aurora.2.10.2
+    AllowedValues:
+      - 5.7.mysql_aurora.2.07.0
+      - 5.7.mysql_aurora.2.07.1
+      - 5.7.mysql_aurora.2.07.2
+      - 5.7.mysql_aurora.2.07.3
+      - 5.7.mysql_aurora.2.07.4
+      - 5.7.mysql_aurora.2.07.5
+      - 5.7.mysql_aurora.2.07.6
+      - 5.7.mysql_aurora.2.07.7
+      - 5.7.mysql_aurora.2.07.8
+      - 5.7.mysql_aurora.2.08.0
+      - 5.7.mysql_aurora.2.08.1
+      - 5.7.mysql_aurora.2.08.2
+      - 5.7.mysql_aurora.2.08.3
+      - 5.7.mysql_aurora.2.08.3
+      - 5.7.mysql_aurora.2.08.4
+      - 5.7.mysql_aurora.2.09.0
+      - 5.7.mysql_aurora.2.09.1
+      - 5.7.mysql_aurora.2.09.2
+      - 5.7.mysql_aurora.2.09.3
+      - 5.7.mysql_aurora.2.10.0
+      - 5.7.mysql_aurora.2.10.1
+      - 5.7.mysql_aurora.2.10.2
+      - 8.0.mysql_aurora.3.01.0
+      - 8.0.mysql_aurora.3.01.1
+      - 8.0.mysql_aurora.3.02.0
+      - 8.0.mysql_aurora.3.02.1
+    Description: Enter engine. Default is 5.7.mysql_aurora.2.10.2.
+  BinlogFileNameInstance:
+    Type: String
+    Default: only-default
+  BinlogPositionInstance:
+    Type: String
+    Default: only-default
 Conditions:
   IsDBClusterPGEmpty:  !Equals [!Ref "DBClusterParameterGroupName", ""]
   IsDbPGEmpty: !Equals [!Ref "DBParameterGroupName", ""]
@@ -233,6 +270,39 @@ Resources:
       Name: !Sub "A2UP-BinlogRetentionPeriod-${AWS::StackName}"
       Description: A2UP-BinlogRetentionPeriod.
       Value: !Ref BinaryLogRetentionPeriod
+      Type: String
+      Tier: Standard
+      Tags:
+        Key: Created-By
+        Value: Aurora2.0Migration
+  SSMA2UPEngineVersion:
+    Type: 'AWS::SSM::Parameter'
+    Properties:
+      Name: !Sub "A2UP-EngineVersion-${AWS::StackName}"
+      Description: A2UP-EngineVersion.
+      Value: !Ref EngineVersionParameter
+      Type: String
+      Tier: Standard
+      Tags:
+        Key: Created-By
+        Value: Aurora2.0Migration
+  SSMA2UPBinlogFileName:
+    Type: 'AWS::SSM::Parameter'
+    Properties:
+      Name: !Sub "A2UP-BinlogFileName-${AWS::StackName}"
+      Description: A2UP-BinlogFileName.
+      Value: !Ref BinlogFileNameInstance
+      Type: String
+      Tier: Standard
+      Tags:
+        Key: Created-By
+        Value: Aurora2.0Migration
+  SSMA2UPBinlogPosition:
+    Type: 'AWS::SSM::Parameter'
+    Properties:
+      Name: !Sub "A2UP-BinlogPosition-${AWS::StackName}"
+      Description: A2UP-BinlogPosition.
+      Value: !Ref BinlogPositionInstance
       Type: String
       Tier: Standard
       Tags:
@@ -406,7 +476,7 @@ Resources:
             Action: 'sts:AssumeRole'
       ManagedPolicyArns:
         - 'arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'
-        - 'arn:aws:iam::aws:policy/AmazonRDSReadOnlyAccess'
+        - 'arn:aws:iam::aws:policy/AmazonRDSFullAccess'
         - 'arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole'
       Path: /
       Policies:
@@ -422,6 +492,7 @@ Resources:
                 Action:
                   - 'rds:CreateDBParameterGroup'
                   - 'rds:ModifyDBParameterGroup'
+                  - 'rds:ModifyDBCluster'
                   - 'rds:AddTagsToResource'
                   - 'rds:CreateDBClusterSnapshot'
                   - 'rds:CreateDBInstance'

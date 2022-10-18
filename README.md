@@ -1,11 +1,12 @@
 ## Aurora1.0 升级到Aurora2.0 Cloudformation
 [Automate the Amazon Aurora MySQL blue/green deployment process](https://aws.amazon.com/cn/blogs/database/automate-the-amazon-aurora-mysql-blue-green-deployment-process/) 文章介绍了方案细节，同时提供了Cloudformation 代码。本项目作了两个优化：
 1. 源方案中使用了python`2.7`,会导致构建方案时失败。改为了`python3.7`
-2. 源方案做的主要工作是clone集群和自动启动副本复制，因此目标集群的引擎版本是和源集群一样的。修改了创建实例的代码，把目标集群引擎强制为`Aurora2.0`.如下：
-```
-    #kwargs['Engine'] = clone_Cluster_Engine
-    kwargs['Engine'] = 'aurora-mysql'
-```
+2. 创建集群和实例的时候使用默认的参数组
+3. 添加`EngineVersionParameter`,`BinlogFileNameInstance`,`BinlogPositionInstance`参数和参数组
+4. 添加数据库集群更新权限
+5. binlog事件只上传binlog信息到参数组
+6. 添加实例创建完成后事件处理，原地更新集群到选定版本
+7. 添加实例更新完成后事件，开始进行replication
 
 ## 方案使用
 ### 下载方案代码
